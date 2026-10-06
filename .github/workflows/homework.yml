@@ -1,0 +1,48 @@
+name: ДЗ в Telegram
+
+on:
+  schedule:
+    # Время по UTC (Баку = UTC+4). GitHub запускает с задержкой 5–15 минут.
+    - cron: "50 11 * * *"  # ДЗ: каждый день ~16:00 по Баку
+    - cron: "5 14 * * 5"   # Отзывы учителей за неделю: пятница ~18:10 по Баку
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Что отправить"
+        type: choice
+        options: [HOMEWORK, FEEDBACK, CHAT_IDS]
+        default: HOMEWORK
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Отправка
+        env:
+          ISAMS_EMAIL: ${{ secrets.ISAMS_EMAIL }}
+          ISAMS_PASSWORD: ${{ secrets.ISAMS_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID_FEEDBACK: ${{ secrets.TELEGRAM_CHAT_ID_FEEDBACK }}
+          MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '5 14 * * 5' && 'FEEDBACK' || 'HOMEWORK') || inputs.mode }}
+        run: python homework_bot.py
+
+      - name: Скриншот, если вход не удался
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-error
+          path: login_error.png
+          if-no-files-found: ignore
