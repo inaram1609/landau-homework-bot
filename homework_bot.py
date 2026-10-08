@@ -1,15 +1,16 @@
 """
 Бот домашних заданий школы Landau (iSAMS Parent Portal) -> Telegram.
 
-Каждый день бот входит в родительский портал, забирает ДЗ всех ваших детей
-на завтра и послезавтра (с прикреплёнными материалами) и отправляет в Telegram.
-По пятницам присылает сводку отзывов учителей за неделю.
+С понедельника по пятницу бот входит в родительский портал, забирает ДЗ всех ваших
+детей на два ближайших учебных дня (в пятницу — на понедельник и вторник) вместе
+с прикреплёнными материалами и отправляет в Telegram. В сообщениях вместо имени
+ребёнка указан класс. По пятницам присылает сводку отзывов учителей за неделю.
 
 Настройки — в секретах GitHub (Settings -> Secrets and variables -> Actions):
   ISAMS_EMAIL                 - email для входа в портал
   ISAMS_PASSWORD              - пароль от портала
   TELEGRAM_BOT_TOKEN          - токен бота от @BotFather
-  TELEGRAM_CHAT_ID            - кому слать ДЗ (можно несколько номеров через запятую)
+  TELEGRAM_CHAT_ID            - кому слать ДЗ (номера через запятую, без пробелов)
   TELEGRAM_CHAT_ID_FEEDBACK   - (необязательно) кому слать отзывы; по умолчанию первый номер из TELEGRAM_CHAT_ID
 """
 
@@ -32,8 +33,7 @@ STUDENTS_URL = (
 )
 
 TZ = ZoneInfo("Asia/Baku")
-DAYS_AHEAD = (1, 2)  # завтра и послезавтра
-
+SCHOOL_DAYS_AHEAD = 2  # два ближайших учебных дня (суббота и воскресенье пропускаются)
 
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
@@ -93,6 +93,21 @@ LOGIN_BUTTONS = [r"^log ?in$", r"^sign ?in$", r"^войти$", r"^вход$", r"
 
 
 def get_access_token(email: str, password: str) -> str:
+    """До 3 попыток входа: портал иногда отвечает очень медленно."""
+    last = None
+    for attempt in range(1, 4):
+        try:
+            return _get_access_token_once(email, password)
+        except Exception as e:
+            last = e
+            print(f"Вход: попытка {attempt} не удалась: {e}", file=sys.stderr)
+            if attempt < 3:
+                import time
+                time.sleep(30 * attempt)
+    raise last
+
+
+def _get_access_token_once(email: str, password: str) -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(locale="en-GB", viewport={"width": 1280, "height": 900})
@@ -310,12 +325,13 @@ def build_feedback_message(child_name: str, form: str, entries: list, since: str
     return "\n".join(lines)
 
 
-def run_feedback(token, students, bot_token, default_chats, only):
+def run_feedback(token, students, bot_token, default_chats):
     today = datetime.now(TZ).date()
     since = (today - timedelta(days=6)).isoformat()   # с субботы по пятницу
     until = today.isoformat()
+    # Отзывы — личные: по умолчанию только первому номеру из TELEGRAM_CHAT_ID
     fb_raw = os.environ.get("TELEGRAM_CHAT_ID_FEEDBACK") or (default_chats.split(",")[0] if default_chats else "")
-    chat_ids = [c.strip() for c in fb_raw.split(",") if c.strip()]
+    chat_ids = parse_chats(fb_raw)
     if not chat_ids:
         return
     for student in students:
@@ -333,6 +349,78 @@ def run_feedback(token, students, bot_token, default_chats, only):
         print(f"{name}: заданий за неделю — {len(hw)}, с отзывами — {len(entries)}")
 
 
+def parse_chats(raw: str) -> list:
+    """Номера через запятую, пробел, точку с запятой или с новой строки; повторы убираются."""
+    out = []
+    for c in re.split(r"[,;\s]+", raw or ""):
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+TG_LIMIT = 48 * 1024 * 1024  # запас до лимита Telegram в 50 МБ
+
+
+def _gs_compress(content: bytes, preset: str) -> bytes:
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = os.path.join(d, "in.pdf"), os.path.join(d, "out.pdf")
+        open(src, "wb").write(content)
+        subprocess.run(["gs", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.4",
+                        f"-dPDFSETTINGS=/{preset}", "-dNOPAUSE", "-dQUIET", "-dBATCH",
+                        f"-sOutputFile={dst}", src], check=True, timeout=600)
+        return open(dst, "rb").read()
+
+
+def _split_pdf(content: bytes, limit: int) -> list:
+    """Режет PDF по страницам на части не больше limit."""
+    import io
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(io.BytesIO(content))
+    n = len(reader.pages)
+    parts_count = max(2, -(-len(content) // limit) + 1)
+    while True:
+        per = max(1, -(-n // parts_count))
+        parts = []
+        for start in range(0, n, per):
+            w = PdfWriter()
+            for p in reader.pages[start:start + per]:
+                w.add_page(p)
+            buf = io.BytesIO()
+            w.write(buf)
+            parts.append(buf.getvalue())
+        if all(len(p) <= limit for p in parts) or per == 1:
+            return [p for p in parts if len(p) <= limit]
+        parts_count *= 2
+
+
+def fit_for_telegram(fname: str, content: bytes) -> list:
+    """Возвращает список (имя, байты), которые можно отправить в Telegram.
+    Большие PDF сжимает, а если не помогло — режет на части. Пустой список — не удалось."""
+    if len(content) <= TG_LIMIT:
+        return [(fname, content)]
+    if not fname.lower().endswith(".pdf"):
+        return []
+    best = content
+    for preset in ("ebook", "screen"):
+        try:
+            smaller = _gs_compress(content, preset)
+            print(f"{fname}: сжатие /{preset} {len(content)//1048576} МБ → {len(smaller)//1048576} МБ", file=sys.stderr)
+            if len(smaller) < len(best):
+                best = smaller
+            if len(best) <= TG_LIMIT:
+                return [(fname, best)]
+        except Exception as e:
+            print(f"{fname}: сжатие /{preset} не удалось: {e}", file=sys.stderr)
+    try:
+        parts = _split_pdf(best, TG_LIMIT)
+        base = fname[:-4]
+        return [(f"{base} (часть {i} из {len(parts)}).pdf", p) for i, p in enumerate(parts, 1)]
+    except Exception as e:
+        print(f"{fname}: не удалось разрезать: {e}", file=sys.stderr)
+        return []
+
+
 # ---------- 3. Оформление сообщения ----------
 
 def clean(text: str) -> str:
@@ -346,6 +434,17 @@ def clean(text: str) -> str:
     return text.strip()
 
 
+def next_school_days(today, n: int) -> list:
+    """Ближайшие n учебных дней после today, без субботы и воскресенья.
+    Пятница -> понедельник и вторник; четверг -> пятница и понедельник."""
+    days, d = [], today
+    while len(days) < n:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            days.append(d.isoformat())
+    return days
+
+
 def human_date(iso: str) -> str:
     d = datetime.strptime(iso, "%Y-%m-%d")
     return f"{WEEKDAYS[d.weekday()].capitalize()}, {d.day} {MONTHS[d.month - 1]}"
@@ -353,7 +452,7 @@ def human_date(iso: str) -> str:
 
 def build_message(child_name: str, form: str, homework: list, dates: list) -> str:
     esc = html.escape
-    lines = [f"📚 <b>{esc(child_name)}</b> ({esc(form)})"]
+    lines = [f"📚 <b>{esc(child_name)}</b>" + (f" ({esc(form)})" if form else "")]
     for day in dates:
         lines.append("")
         lines.append(f"📅 <b>{esc(human_date(day))}</b>")
@@ -452,51 +551,73 @@ def main():
     password = os.environ["ISAMS_PASSWORD"]
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     default_chats = os.environ.get("TELEGRAM_CHAT_ID", "")
-    only = "ALL"
+    mode = (os.environ.get("MODE") or "HOMEWORK").strip().upper()
+
+    if mode == "CHAT_IDS":
+        run_chat_ids(bot_token, parse_chats(default_chats))
+        return
 
     today = datetime.now(TZ).date()
-    dates = [(today + timedelta(days=n)).isoformat() for n in DAYS_AHEAD]
-
-    if (os.environ.get("MODE") or "").strip().upper() == "CHAT_IDS":
-        run_chat_ids(bot_token, [c.strip() for c in default_chats.split(",") if c.strip()])
-        return
+    dates = next_school_days(today, SCHOOL_DAYS_AHEAD)
 
     token = get_access_token(email, password)
     students = api_get(STUDENTS_URL, token).get("students", [])
 
-    if (os.environ.get("MODE") or "HOMEWORK").strip().upper() == "FEEDBACK":
-        run_feedback(token, students, bot_token, default_chats, only)
+    if mode == "FEEDBACK":
+        run_feedback(token, students, bot_token, default_chats)
         return
 
-    chat_ids = [c.strip() for c in default_chats.split(",") if c.strip()]
+    chat_ids = parse_chats(default_chats)
+    if not chat_ids:
+        raise RuntimeError("Не указан получатель: заполните секрет TELEGRAM_CHAT_ID")
+
     for student in students:
         name = student.get("forename") or student.get("fullName") or "Ребёнок"
+        # В сообщениях вместо имени ребёнка — только класс
+        form = (student.get("formGroup") or "").strip()
+        label = f"Класс {form}" if form else name
         hw = get_homework(token, student["schoolId"], set(dates))
         hw.sort(key=lambda h: h["dueDate"])
         for h in hw:
             h["_resources"] = get_resources(token, h.get("homeworkId"))
-        msg = build_message(name, student.get("formGroup") or "", hw, dates)
+        msg = build_message(label, "", hw, dates)
         send_telegram(bot_token, chat_ids, msg)
 
-        files_sent = 0
+        # Один и тот же файл, прикреплённый к нескольким заданиям, шлём один раз
+        groups = {}
         for h in hw:
             for res in h["_resources"]:
                 if res.get("type") != "Document":
                     continue
                 fname = res.get("fileName") or f"material_{res.get('id')}"
-                try:
-                    content = download_document(token, h.get("homeworkId"), res.get("id"))
-                except Exception as e:
-                    print(f"Не удалось скачать {fname}: {e}", file=sys.stderr)
-                    continue
-                if len(content) > 49 * 1024 * 1024:
-                    print(f"Файл {fname} больше 50 МБ — Telegram не принимает, пропускаю", file=sys.stderr)
-                    continue
-                caption = (f"📎 <b>{html.escape(name)}</b> · {html.escape(human_date(h['dueDate'][:10]))}\n"
-                           f"{html.escape(clean(h.get('title')))}")
-                send_telegram_document(bot_token, chat_ids, fname, content, caption)
+                groups.setdefault(fname, {"res": res, "hw": h, "tasks": []})["tasks"].append(h)
+
+        files_sent = 0
+        for fname, g in groups.items():
+            try:
+                content = download_document(token, g["hw"].get("homeworkId"), g["res"].get("id"))
+            except Exception as e:
+                print(f"Не удалось скачать {fname}: {e}", file=sys.stderr)
+                continue
+            seen, task_lines = set(), []
+            for t in g["tasks"]:
+                line = f"{human_date(t['dueDate'][:10])}: {clean(t.get('title'))}"
+                if line not in seen:
+                    seen.add(line)
+                    task_lines.append(html.escape(line))
+            caption = f"📎 <b>{html.escape(label)}</b>\n" + "\n".join(task_lines)
+            pieces = fit_for_telegram(fname, content)
+            if not pieces:
+                send_telegram(bot_token, chat_ids,
+                              f"⚠️ Файл <b>{html.escape(fname)}</b> ({len(content)//1048576} МБ) слишком большой для Telegram.\n"
+                              f"{caption}\nОткройте его в портале: раздел Homework → задание → Supporting Documents.")
+                continue
+            if len(pieces) == 1 and len(pieces[0][1]) < len(content):
+                caption += "\n<i>(файл сжат, чтобы пройти лимит Telegram)</i>"
+            for pname, pbytes in pieces:
+                send_telegram_document(bot_token, chat_ids, pname, pbytes, caption)
                 files_sent += 1
-        print(f"{name}: отправлено заданий — {len(hw)}, файлов — {files_sent}")
+        print(f"{label}: отправлено заданий — {len(hw)}, файлов — {files_sent}")
 
 
 if __name__ == "__main__":

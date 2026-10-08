@@ -1,6 +1,6 @@
 # 📚 ДЗ Landau → Telegram
 
-Бот каждый день сам заходит в родительский портал школы Landau (iSAMS), забирает домашние задания ваших детей **на завтра и послезавтра** вместе с прикреплёнными материалами и присылает их в Telegram — вам, няне, бабушке, кому захотите. По пятницам присылает **сводку отзывов учителей за неделю**.
+Бот с понедельника по пятницу сам заходит в родительский портал школы Landau (iSAMS), забирает домашние задания ваших детей **на два ближайших учебных дня** (в пятницу — сразу на понедельник и вторник) вместе с прикреплёнными материалами и присылает их в Telegram — вам, няне, бабушке, кому захотите. По пятницам присылает **сводку отзывов учителей за неделю**.
 
 - Работает бесплатно, на серверах GitHub — ваш компьютер включать не нужно.
 - Ваш логин и пароль хранятся в зашифрованных «секретах» **вашей** копии. Никто, включая автора шаблона, их не видит.
@@ -47,22 +47,24 @@
 Зелёная галочка ✅ — всё работает. Красный крестик ❌ — откройте запуск: внизу будет файл `login-error` со скриншотом (чаще всего — опечатка в email/пароле).
 
 ### Готово 🎉
-- **ДЗ** приходит каждый день ~**16:00** по Баку.
-- **Отзывы учителей** — по пятницам ~**18:10**, только на первый номер из `TELEGRAM_CHAT_ID` (отзывы личные). Чтобы слать их кому-то ещё, добавьте секрет `TELEGRAM_CHAT_ID_FEEDBACK` с номерами через запятую.
+- **ДЗ** приходит с понедельника по пятницу ~**15:40** по Баку. Если GitHub опоздал, есть запасные попытки в 16:10 и 16:40; дважды за день ДЗ не придёт.
+- В сообщениях вместо имени ребёнка указан класс, например «Класс 5R3».
+- **Отзывы учителей** — по пятницам ~**18:00**, только на первый номер из `TELEGRAM_CHAT_ID` (отзывы личные). Чтобы слать их кому-то ещё, добавьте секрет `TELEGRAM_CHAT_ID_FEEDBACK` с номерами через запятую.
 
 ### Как изменить время
-Откройте файл `.github/workflows/homework.yml` → карандаш ✏️ → в строке `cron: "50 11 * * *"` первое число — минуты, второе — часы **по UTC** (Баку минус 4 часа). Например, для ~15:00 по Баку: `"50 10 * * *"`. Сохраните (**Commit changes**).
+Откройте файл `.github/workflows/homework.yml` → карандаш ✏️ → в строках `cron: "40 11 * * 1-5"` (и двух запасных под ней) первое число — минуты, второе — часы **по UTC** (Баку минус 4 часа). Например, для ~15:00 по Баку: `"0 11 * * 1-5"`. Сохраните (**Commit changes**).
 
 ### Частые вопросы
 - **Сменили пароль от портала?** Обновите секрет `ISAMS_PASSWORD` (карандаш ✏️ рядом с ним).
-- **Файл не пришёл?** Telegram не принимает файлы больше 50 МБ — такие откройте в портале.
+- **Большой файл?** PDF больше 50 МБ бот сжимает, а если не помогло — присылает частями. Один и тот же файл, прикреплённый к нескольким заданиям, приходит один раз.
+- **Номера получателей** пишите через запятую без пробелов. Значение секрета заменяется целиком, поэтому при добавлении человека вписывайте весь список.
 - **Хочу сразу проверить отзывы:** Run workflow → **FEEDBACK**.
 
 ---
 
 ## 🇦🇿 Azərbaycan dilində
 
-Bot hər gün Landau məktəbinin valideyn portalına (iSAMS) özü daxil olur, uşaqlarınızın **sabah və birigün** üçün ev tapşırıqlarını əlavə materiallarla birlikdə götürür və Telegram-a göndərir — sizə, dayəyə, nənəyə, kimə istəsəniz. Cümə günləri **müəllimlərin həftəlik rəylərinin xülasəsini** göndərir.
+Bot bazar ertəsindən cüməyə qədər Landau məktəbinin valideyn portalına (iSAMS) özü daxil olur, uşaqlarınızın **ən yaxın iki dərs günü** üçün (cümə günü — bazar ertəsi və çərşənbə axşamı üçün) ev tapşırıqlarını əlavə materiallarla birlikdə götürür və Telegram-a göndərir — sizə, dayəyə, nənəyə, kimə istəsəniz. Cümə günləri **müəllimlərin həftəlik rəylərinin xülasəsini** göndərir.
 
 - Pulsuzdur, GitHub serverlərində işləyir — kompüterinizin açıq olması lazım deyil.
 - Login və şifrəniz **sizin** nüsxənizdə şifrələnmiş «secrets» bölməsində saxlanılır. Heç kim, şablonun müəllifi də daxil olmaqla, onları görmür.
@@ -103,13 +105,15 @@ Bot hər gün Landau məktəbinin valideyn portalına (iSAMS) özü daxil olur, 
 Yaşıl ✅ — hər şey işləyir. Qırmızı ❌ — işə salınmanı açın: aşağıda ekran görüntüsü ilə `login-error` faylı olacaq (çox vaxt email/şifrədə səhv olur).
 
 ### Hazırdır 🎉
-- **Ev tapşırıqları** hər gün Bakı vaxtı ilə ~**16:00**-da gəlir.
-- **Müəllim rəyləri** — cümə günləri ~**18:10**-da, yalnız `TELEGRAM_CHAT_ID`-dəki ilk nömrəyə (rəylər şəxsidir). Başqalarına da göndərmək üçün nömrələrlə `TELEGRAM_CHAT_ID_FEEDBACK` sirri əlavə edin.
+- **Ev tapşırıqları** bazar ertəsindən cüməyə qədər Bakı vaxtı ilə ~**15:40**-da gəlir (ehtiyat cəhdlər 16:10 və 16:40-da; gündə iki dəfə gəlmir).
+- Mesajlarda uşağın adı əvəzinə sinif göstərilir, məsələn «Класс 5R3».
+- **Müəllim rəyləri** — cümə günləri ~**18:00**-da, yalnız `TELEGRAM_CHAT_ID`-dəki ilk nömrəyə (rəylər şəxsidir). Başqalarına da göndərmək üçün nömrələrlə `TELEGRAM_CHAT_ID_FEEDBACK` sirri əlavə edin.
 
 ### Vaxtı necə dəyişmək olar
-`.github/workflows/homework.yml` faylını açın → qələm ✏️ → `cron: "50 11 * * *"` sətrində birinci rəqəm — dəqiqə, ikinci — saat **UTC** ilə (Bakı vaxtı mınus 4 saat). Məsələn, Bakı vaxtı ilə ~15:00 üçün: `"50 10 * * *"`. Yadda saxlayın (**Commit changes**).
+`.github/workflows/homework.yml` faylını açın → qələm ✏️ → `cron: "40 11 * * 1-5"` sətrində (və altındakı iki ehtiyat sətirdə) birinci rəqəm — dəqiqə, ikinci — saat **UTC** ilə (Bakı vaxtı mınus 4 saat). Məsələn, Bakı vaxtı ilə ~15:00 üçün: `"0 11 * * 1-5"`. Yadda saxlayın (**Commit changes**).
 
 ### Tez-tez verilən suallar
 - **Portalın şifrəsini dəyişmisiniz?** `ISAMS_PASSWORD` sirrini yeniləyin.
-- **Fayl gəlmədi?** Telegram 50 MB-dan böyük faylları qəbul etmir — onları portalda açın.
+- **Böyük fayl?** 50 MB-dan böyük PDF-i bot sıxır, alınmasa hissə-hissə göndərir.
+- **Alıcı nömrələrini** vergüllə, boşluqsuz yazın. Sirr tam əvəz olunur, ona görə yeni adam əlavə edəndə bütün siyahını yazın.
 - **Rəyləri dərhal yoxlamaq istəyirəm:** Run workflow → **FEEDBACK**.
