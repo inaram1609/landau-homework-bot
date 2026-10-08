@@ -2,10 +2,15 @@ name: ДЗ в Telegram
 
 on:
   schedule:
-    # Время по UTC (Баку = UTC+4). GitHub запускает с задержкой 5–15 минут.
-    - cron: "50 11 * * *"  # ДЗ: каждый день ~16:00 по Баку
-    - cron: "5 14 * * 5"   # Отзывы учителей за неделю: пятница ~18:10 по Баку
-  workflow_dispatch:
+    # Время по UTC (Баку = UTC+4). ДЗ — с понедельника по пятницу (в пятницу — на пн и вт).
+    # GitHub часто опаздывает или пропускает запуски, поэтому попыток несколько:
+    # после первой успешной отправки остальные попытки этого дня пропускаются.
+    - cron: "40 11 * * 1-5"   # ДЗ ~15:40 по Баку
+    - cron: "10 12 * * 1-5"   # ДЗ, запасной ~16:10
+    - cron: "40 12 * * 1-5"   # ДЗ, запасной ~16:40
+    - cron: "55 13 * * 5"     # Отзывы учителей, пятница ~17:55
+    - cron: "25 14 * * 5"     # Отзывы, запасной ~18:25
+  workflow_dispatch:          # кнопка «Run workflow» для ручного запуска
     inputs:
       mode:
         description: "Что отправить"
@@ -13,31 +18,88 @@ on:
         options: [HOMEWORK, FEEDBACK, CHAT_IDS]
         default: HOMEWORK
 
+concurrency:
+  group: homework-bot
+  cancel-in-progress: false
+
 jobs:
   send:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
+      - name: Что отправлять
+        id: plan
+        run: |
+          echo "day=$(TZ=Asia/Baku date +%F)" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "scheduled=true" >> "$GITHUB_OUTPUT"
+            case "${{ github.event.schedule }}" in
+              "55 13 * * 5"|"25 14 * * 5") echo "mode=FEEDBACK" >> "$GITHUB_OUTPUT" ;;
+              *) echo "mode=HOMEWORK" >> "$GITHUB_OUTPUT" ;;
+            esac
+          else
+            echo "scheduled=false" >> "$GITHUB_OUTPUT"
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Уже отправлено сегодня?
+        id: sent
+        if: steps.plan.outputs.scheduled == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: sent.marker
+          key: sent-${{ steps.plan.outputs.mode }}-${{ steps.plan.outputs.day }}
+          lookup-only: true
+
+      - name: Решение
+        id: todo
+        run: |
+          if [ "${{ steps.sent.outputs.cache-hit }}" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"; echo "Сегодня уже отправлено — пропускаю."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.todo.outputs.run == 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.todo.outputs.run == 'true'
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Установка
+        if: steps.todo.outputs.run == 'true'
+        timeout-minutes: 10
         run: |
           pip install -r requirements.txt
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq ghostscript >/dev/null || echo "ghostscript не установился — большие PDF будут резаться на части"
           python -m playwright install --with-deps chromium
 
       - name: Отправка
+        if: steps.todo.outputs.run == 'true'
+        timeout-minutes: 15
         env:
           ISAMS_EMAIL: ${{ secrets.ISAMS_EMAIL }}
           ISAMS_PASSWORD: ${{ secrets.ISAMS_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_CHAT_ID_FEEDBACK: ${{ secrets.TELEGRAM_CHAT_ID_FEEDBACK }}
-          MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '5 14 * * 5' && 'FEEDBACK' || 'HOMEWORK') || inputs.mode }}
+          MODE: ${{ steps.plan.outputs.mode }}
         run: python homework_bot.py
+
+      - name: Запомнить, что отправлено
+        if: steps.plan.outputs.scheduled == 'true' && steps.todo.outputs.run == 'true' && success()
+        run: date > sent.marker
+
+      - name: Сохранить отметку
+        if: steps.plan.outputs.scheduled == 'true' && steps.todo.outputs.run == 'true' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: sent.marker
+          key: sent-${{ steps.plan.outputs.mode }}-${{ steps.plan.outputs.day }}
 
       - name: Скриншот, если вход не удался
         if: failure()
